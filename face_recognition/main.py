@@ -5,7 +5,7 @@ import shutil
 import numpy as np
 
 # === Configuration ===
-video_path = r"C:\Users\Hp\OneDrive\Desktop\AI\videos\cctv.mp4"
+video_path = r"C:\Users\Hp\OneDrive\Desktop\AI\videos\WhatsApp Video 2025-07-03 at 23.42.10_092aaead.mp4"
 suspect_path = r"C:\Users\Hp\OneDrive\Desktop\AI\known\suspect.jpg"
 detector_backend = "opencv"           # Faster than retinaface
 model_name = "VGG-Face"               # Lightweight model
