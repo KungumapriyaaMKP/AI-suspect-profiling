@@ -1,53 +1,93 @@
-import face_recognition
 import cv2
+from deepface import DeepFace
 import os
-import csv
-from datetime import datetime
+import shutil
+import numpy as np
 
-# Step 1: Load Known Faces
-known_face_encodings = []
-known_face_names = []
+# === Configuration ===
+video_path = r"C:\Users\Hp\OneDrive\Desktop\AI\videos\cctv.mp4"
+suspect_path = r"C:\Users\Hp\OneDrive\Desktop\AI\known\suspect.jpg"
+detector_backend = "opencv"           # Faster than retinaface
+model_name = "VGG-Face"               # Lightweight model
+frame_skip = 5                        # Process every 5th frame
+distance_threshold = 0.4              # Adjust if too strict/loose
 
-known_faces_dir = "face_recognition/known_faces"
+# === Output folder ===
+matched_folder = "matched_faces"
+os.makedirs(matched_folder, exist_ok=True)
 
-for filename in os.listdir(known_faces_dir):
-    image_path = os.path.join(known_faces_dir, filename)
-    image = face_recognition.load_image_file(image_path)
-    encoding = face_recognition.face_encodings(image)[0]
+# === Load suspect embedding ===
+print("[INFO] Loading suspect face embedding...")
+suspect_embedding = DeepFace.represent(
+    img_path=suspect_path,
+    model_name=model_name,
+    detector_backend=detector_backend,
+    enforce_detection=True
+)[0]["embedding"]
 
-    known_face_encodings.append(encoding)
-    known_face_names.append(os.path.splitext(filename)[0])
+# === Process CCTV video ===
+print("[INFO] Starting video analysis...")
+cap = cv2.VideoCapture(video_path)
+frame_id = 0
+match_id = 0
 
-# Step 2: Webcam Access
-video_capture = cv2.VideoCapture(0)
-
-def log_detection(name):
-    with open("face_recognition/detection_log.csv", "a", newline="") as file:
-        writer = csv.writer(file)
-        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), name])
-
-while True:
-    ret, frame = video_capture.read()
-    rgb_frame = frame[:, :, ::-1]
-
-    face_locations = face_recognition.face_locations(rgb_frame)
-    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-        matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
-        name = "Unknown"
-
-        if True in matches:
-            match_index = matches.index(True)
-            name = known_face_names[match_index]
-            log_detection(name)
-
-        cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-        cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-
-    cv2.imshow('Suspect Recognition', frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
         break
 
-video_capture.release()
+    frame_id += 1
+    if frame_id % frame_skip != 0:
+        continue
+
+    try:
+        # Detect faces in current frame
+        faces = DeepFace.extract_faces(
+            img_path=frame,
+            detector_backend=detector_backend,
+            enforce_detection=False
+        )
+
+        for face in faces:
+            facial_area = face["facial_area"]
+            face_img = face["face"]
+
+            if face_img is None or face_img.size == 0:
+                continue
+
+            # Get embedding of detected face
+            embedding = DeepFace.represent(
+                img_path=face_img,
+                model_name=model_name,
+                detector_backend=detector_backend,
+                enforce_detection=False
+            )[0]["embedding"]
+
+            # Compute cosine distance
+            distance = np.dot(suspect_embedding, embedding) / (np.linalg.norm(suspect_embedding) * np.linalg.norm(embedding))
+
+            # Cosine similarity: closer to 1 means similar
+            if distance > (1 - distance_threshold):
+                # Draw bounding box & label
+                x, y, w, h = facial_area["x"], facial_area["y"], facial_area["w"], facial_area["h"]
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(frame, f"MATCH: {distance:.2f}", (x, y - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                # Save the matched face
+                face_filename = os.path.join(matched_folder, f"match_{match_id}.jpg")
+                cv2.imwrite(face_filename, face_img)
+                match_id += 1
+
+    except Exception as e:
+        print(f"[ERROR] Frame {frame_id}: {e}")
+        continue
+
+    # Display annotated frame
+    cv2.imshow("CCTV Face Matching", frame)
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
 cv2.destroyAllWindows()
+print(f"\n[INFO] Completed. Matches saved in: {matched_folder}")
