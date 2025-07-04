@@ -1,42 +1,35 @@
-import cv2
+import cv2, os, numpy as np, csv, smtplib, mimetypes
 from deepface import DeepFace
-import os
-import numpy as np
-import csv
-import smtplib
 from email.message import EmailMessage
 from email.utils import formatdate
-import mimetypes
 
 # === Configuration ===
 video_path = r"C:\Users\Hp\OneDrive\Desktop\AI\videos\WhatsApp Video 2025-07-03 at 23.42.10_092aaead.mp4"
-suspect_path = r"C:\Users\Hp\OneDrive\Desktop\AI\known\actor vijay.jpg"
-detector_backend = "opencv"
-model_name = "VGG-Face"
-frame_skip = 5
-distance_threshold = 0.4
-
-# === Output folders ===
+known_folder = r"C:\Users\Hp\OneDrive\Desktop\AI\known"
 matched_folder = "matched_faces"
 os.makedirs(matched_folder, exist_ok=True)
 
-# === Email Sender Function ===
+detector_backend = "opencv"         # Accurate & fast
+model_name = "VGG-Face"             # Accurate (but slower)
+frame_skip = 5                      # Moderate speed
+distance_threshold = 0.4            # Match threshold
+
+# === Email Setup ===
 def send_match_email(to_email, subject, body, attachment_path):
     sender_email = "priyamani5122005@gmail.com"
-    sender_password = "vwet gekw itvu ozzl"  # Replace with your App Password
+    sender_password = "vwet gekw itvu ozzl"  # Gmail app password (keep secret)
 
     msg = EmailMessage()
-    msg['From'] = sender_email
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg['Date'] = formatdate(localtime=True)
+    msg["From"] = sender_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(localtime=True)
     msg.set_content(body)
 
     mime_type, _ = mimetypes.guess_type(attachment_path)
-    mime_type, mime_subtype = mime_type.split('/')
-    with open(attachment_path, 'rb') as file:
-        msg.add_attachment(file.read(), maintype=mime_type,
-                           subtype=mime_subtype,
+    maintype, subtype = mime_type.split('/')
+    with open(attachment_path, 'rb') as f:
+        msg.add_attachment(f.read(), maintype=maintype, subtype=subtype,
                            filename=os.path.basename(attachment_path))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
@@ -44,27 +37,31 @@ def send_match_email(to_email, subject, body, attachment_path):
         smtp.send_message(msg)
         print(f"[EMAIL] Alert sent to {to_email}")
 
-# === Load suspect embedding ===
-print("[INFO] Loading suspect face embedding...")
-suspect_embedding = DeepFace.represent(
-    img_path=suspect_path,
-    model_name=model_name,
-    detector_backend=detector_backend,
-    enforce_detection=True
-)[0]["embedding"]
+# === Load suspect embeddings ===
+print("[INFO] Loading suspect embeddings...")
+suspects = []
+for file in os.listdir(known_folder):
+    if file.lower().endswith((".jpg", ".jpeg", ".png")):
+        path = os.path.join(known_folder, file)
+        name = os.path.splitext(file)[0].replace("_", " ").title()
+        embedding = DeepFace.represent(img_path=path, model_name=model_name,
+                                       detector_backend=detector_backend, enforce_detection=True)[0]["embedding"]
+        suspects.append((name, embedding))
+        print(f"[INFO] Loaded: {name}")
+print(f"[INFO] Total suspects loaded: {len(suspects)}")
 
-# === Setup logging to CSV ===
+# === Logging Setup ===
 log_file = open("match_log.csv", mode="w", newline="")
 csv_writer = csv.writer(log_file)
-csv_writer.writerow(["Match_ID", "Frame_ID", "Similarity", "Timestamp", "Person_Name"])
+csv_writer.writerow(["Match_ID", "Frame_ID", "Timestamp", "Suspect_Name", "Similarity"])
 
-# === Process video ===
-print("[INFO] Starting video analysis...")
+# === Process Video ===
 cap = cv2.VideoCapture(video_path)
 frame_id = 0
 match_id = 0
-email_sent = False
-face_saved = False
+email_sent = set()
+
+print("[INFO] Starting video analysis...")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -75,87 +72,53 @@ while cap.isOpened():
     if frame_id % frame_skip != 0:
         continue
 
-    try:
-        frame_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+    timestamp = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0  # in seconds
 
-        faces = DeepFace.extract_faces(
-            img_path=frame,
-            detector_backend=detector_backend,
-            enforce_detection=False
-        )
+    try:
+        faces = DeepFace.extract_faces(frame, detector_backend=detector_backend, enforce_detection=False)
 
         for face in faces:
-            facial_area = face["facial_area"]
             face_img = face["face"]
-
             if face_img is None or face_img.size == 0:
                 continue
 
-            embedding = DeepFace.represent(
-                img_path=face_img,
-                model_name=model_name,
-                detector_backend=detector_backend,
-                enforce_detection=False
-            )[0]["embedding"]
+            if face_img.dtype != "uint8":
+                face_img = (face_img * 255).astype("uint8")
 
-            distance = np.dot(suspect_embedding, embedding) / (
-                np.linalg.norm(suspect_embedding) * np.linalg.norm(embedding))
+            face_embedding = DeepFace.represent(img_path=face_img, model_name=model_name,
+                                                detector_backend=detector_backend, enforce_detection=False)[0]["embedding"]
 
-            if distance > (1 - distance_threshold):
-                x, y, w, h = facial_area["x"], facial_area["y"], facial_area["w"], facial_area["h"]
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.putText(frame, f"MATCH: {distance:.2f}", (x, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            for name, suspect_embedding in suspects:
+                similarity = np.dot(suspect_embedding, face_embedding) / (
+                    np.linalg.norm(suspect_embedding) * np.linalg.norm(face_embedding))
 
-                # Fix black image issue
-                if face_img.dtype != "uint8":
-                    face_img = (face_img * 255).astype("uint8")
+                if similarity > (1 - distance_threshold) and name not in email_sent:
+                    facial_area = face["facial_area"]
+                    x, y, w, h = facial_area["x"], facial_area["y"], facial_area["w"], facial_area["h"]
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-                # Skip dark images
-                if np.mean(face_img) < 10:
-                    print(f"[SKIPPED] Face too dark at frame {frame_id}")
-                    continue
+                    cv2.putText(frame, f"{name} ({similarity:.2f})", (x, y - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                # Save and email only once
-                if not face_saved:
-                    face_filename = os.path.join(matched_folder, f"match_{match_id}.jpg")
-                    frame_filename = os.path.join(matched_folder, f"frame_{match_id}.jpg")
-                    cv2.imwrite(face_filename, face_img)
-                    cv2.imwrite(frame_filename, frame)
+                    face_path = os.path.join(matched_folder, f"match_{match_id}_{name}.jpg")
+                    cv2.imwrite(face_path, face_img)
 
-                    person_name = os.path.splitext(os.path.basename(suspect_path))[0].replace("_", " ").title()
+                    csv_writer.writerow([match_id, frame_id, f"{timestamp:.2f}", name, f"{similarity:.2f}"])
 
-                    # Log match
-                    csv_writer.writerow([match_id, frame_id, f"{distance:.2f}", f"{frame_time:.2f}", person_name])
+                    # Send email
+                    body = f"""
+🚨 Suspect Match Detected!
 
-                    # Send alert once
-                    if not email_sent:
-                        subject = f"ALERT: Suspect Match - {person_name}"
-                        body = f"""
-🚨 Face Match Detected!
+🧍 Name: {name}
+⏱️ Time: {timestamp:.2f}s
+📈 Similarity: {similarity:.2f}
+📸 Frame ID: {frame_id}
+                    """.strip()
 
-📍 Suspect Name: {person_name}
-🕒 Time: {frame_time:.2f}s
-🎞️ Frame ID: {frame_id}
-📌 Similarity Score: {distance:.2f}
+                    send_match_email("priyamani5122005@gmail.com", f"ALERT: Match Found - {name}", body, face_path)
 
-Check attached matched face.
-                        """.strip()
-
-                        send_match_email(
-                            to_email="priyamani5122005@gmail.com",
-                            subject=subject,
-                            body=body,
-                            attachment_path=face_filename
-                        )
-                        email_sent = True
-
-                    face_saved = True
+                    email_sent.add(name)
                     match_id += 1
-
-        # Timestamp overlay
-        cv2.putText(frame, f"Time: {frame_time:.2f}s", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
     except Exception as e:
         print(f"[ERROR] Frame {frame_id}: {e}")
@@ -168,4 +131,4 @@ Check attached matched face.
 cap.release()
 cv2.destroyAllWindows()
 log_file.close()
-print(f"\n[INFO] Completed. Matches saved in: {matched_folder}")
+print("[INFO] Done. Matches saved in:", matched_folder)
